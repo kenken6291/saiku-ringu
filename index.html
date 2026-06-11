@@ -1,0 +1,846 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>サイクリング Saiku-ringu | ランドナー旅程計画</title>
+
+<!-- ============================================================
+     外部ライブラリ（すべてAPIキー不要のCDN）
+     - Leaflet.js : 地図表示（OpenStreetMap）
+     - Chart.js   : 高低差（標高プロフィール）グラフ
+     - Google Fonts : 見出し用明朝・本文ゴシック・等幅
+     ============================================================ -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Shippori+Mincho:wght@600;800&family=Zen+Kaku+Gothic+New:wght@400;500;700&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
+
+<style>
+/* ============================================================
+   デザイントークン（配色・書体）
+   旧版地形図とローカル線の時刻表をモチーフにした配色:
+   松葉色（深緑）× 柿色（ルート・標高）× 鉄紺（輪行・駅）
+   ============================================================ */
+:root{
+  --bg:        #F2F4F0;   /* 全体背景（淡い灰緑） */
+  --panel:     #FFFFFF;   /* パネル背景 */
+  --ink:       #22312B;   /* 基本文字色 */
+  --ink-sub:   #6B7A72;   /* 補助文字色 */
+  --pine:      #1F4636;   /* 松葉色：ヘッダー・見出し */
+  --pine-soft: #E4EBE6;   /* 松葉の淡色 */
+  --kaki:      #D96B2F;   /* 柿色：ルート・標高グラフ */
+  --kaki-soft: #FBEADF;
+  --rail:      #2F5D8A;   /* 鉄紺：駅・輪行 */
+  --rail-soft: #E3ECF5;
+  --line:      #D8DED9;   /* 罫線 */
+  --radius: 10px;
+  --font-display: "Shippori Mincho", serif;
+  --font-body: "Zen Kaku Gothic New", sans-serif;
+  --font-mono: "IBM Plex Mono", monospace;
+}
+*{ box-sizing:border-box; margin:0; padding:0; }
+html,body{ height:100%; }
+body{
+  font-family: var(--font-body);
+  color: var(--ink);
+  background: var(--bg);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+/* ============================================================
+   ヘッダー
+   ============================================================ */
+header{
+  background: var(--pine);
+  color: #F4F1E6;
+  padding: 10px 16px;
+  display:flex; align-items:baseline; gap:12px; flex-wrap:wrap;
+}
+header h1{
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 20px;
+  letter-spacing: .12em;
+}
+header .sub{
+  font-size: 11px; opacity:.75; letter-spacing:.08em;
+}
+
+/* ============================================================
+   レイアウト（PC: 2カラム / スマホ: タブ切替）
+   ============================================================ */
+.app{
+  display:grid;
+  grid-template-columns: minmax(0,1fr) 380px;  /* 左:地図+グラフ 右:行程表 */
+  gap: 12px;
+  padding: 12px;
+  height: calc(100vh - 48px);
+}
+.col-left{ display:flex; flex-direction:column; gap:12px; min-width:0; min-height:0; }
+.col-right{ min-width:0; min-height:0; display:flex; flex-direction:column; }
+
+.panel{
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow:hidden;
+  display:flex; flex-direction:column;
+}
+.panel-head{
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+}
+.panel-head h2{
+  font-family: var(--font-display);
+  font-size: 14px; font-weight:600; color: var(--pine);
+  letter-spacing:.1em;
+  margin-right:auto;
+}
+
+/* 地図パネル */
+#panel-map{ flex: 1 1 55%; min-height: 260px; }
+#map{ flex:1; min-height:200px; }
+
+/* グラフパネル */
+#panel-chart{ flex: 1 1 45%; min-height: 200px; }
+.chart-wrap{ flex:1; position:relative; padding: 6px 10px 10px; min-height:0; }
+
+/* 行程表パネル */
+#panel-plan{ flex:1; }
+.plan-body{ flex:1; overflow-y:auto; }
+
+/* ============================================================
+   ボタン・入力部品
+   ============================================================ */
+.btn{
+  font-family: var(--font-body);
+  font-size: 12px; font-weight:500;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff; color: var(--ink);
+  cursor: pointer;
+  transition: background .15s, border-color .15s;
+}
+.btn:hover{ background: var(--pine-soft); }
+.btn.primary{ background: var(--pine); border-color: var(--pine); color:#fff; }
+.btn.primary:hover{ background:#2A5A47; }
+.btn.toggled{ background: var(--kaki); border-color: var(--kaki); color:#fff; }
+.btn:focus-visible, select:focus-visible, input:focus-visible{
+  outline: 2px solid var(--rail); outline-offset:2px;
+}
+select, input[type="time"], input[type="number"]{
+  font-family: var(--font-body); font-size:12px;
+  padding: 4px 6px;
+  border:1px solid var(--line); border-radius:6px; background:#fff; color:var(--ink);
+}
+input[type="number"]{ width: 56px; font-family: var(--font-mono); }
+.file-label{ position:relative; overflow:hidden; }
+.file-label input[type="file"]{ position:absolute; inset:0; opacity:0; cursor:pointer; }
+
+/* 操作ツールバー（地図パネル内） */
+.toolbar{
+  display:flex; gap:6px; flex-wrap:wrap; align-items:center;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: #FBFCFB;
+}
+.toolbar .sep{ width:1px; height:20px; background: var(--line); }
+.hint{
+  font-size: 11px; color: var(--ink-sub);
+  padding: 4px 12px;
+  background:#FBFCFB;
+  border-bottom:1px solid var(--line);
+}
+
+/* 設定（走行速度）パネル */
+details.settings{ font-size:12px; }
+details.settings summary{ cursor:pointer; color:var(--ink-sub); padding:6px 12px; user-select:none; }
+.settings-grid{
+  display:grid; grid-template-columns: repeat(auto-fit, minmax(150px,1fr));
+  gap:8px; padding: 4px 12px 10px;
+}
+.settings-grid label{ display:flex; align-items:center; justify-content:space-between; gap:6px; color:var(--ink-sub); }
+
+/* ============================================================
+   行程表（時刻表風タイムライン）
+   ============================================================ */
+.summary{
+  display:grid; grid-template-columns: repeat(3,1fr);
+  border-bottom:1px solid var(--line);
+}
+.summary div{ padding: 8px 6px; text-align:center; }
+.summary div + div{ border-left:1px solid var(--line); }
+.summary .num{ font-family: var(--font-mono); font-weight:600; font-size:16px; color:var(--pine); }
+.summary .lbl{ font-size:10px; color:var(--ink-sub); letter-spacing:.08em; }
+
+.timeline{ list-style:none; padding: 12px 12px 12px 8px; position:relative; }
+.timeline::before{        /* 行程を貫く縦罫（時刻表のイメージ） */
+  content:""; position:absolute; left: 86px; top: 16px; bottom: 16px;
+  width: 2px; background: var(--pine-soft);
+}
+.tl-item{
+  display:grid;
+  grid-template-columns: 64px 36px 1fr;
+  gap: 4px; align-items:flex-start;
+  padding: 6px 0;
+  position:relative;
+}
+.tl-time{
+  font-family: var(--font-mono); font-weight:600; font-size:13px;
+  text-align:right; color: var(--ink); padding-top:4px;
+}
+.tl-time small{ display:block; font-size:10px; color:var(--ink-sub); font-weight:400; }
+.tl-mark{
+  width: 26px; height: 26px; border-radius:50%;
+  display:flex; align-items:center; justify-content:center;
+  font-family: var(--font-display); font-size:13px; font-weight:600;
+  color:#fff; margin: 2px auto 0; z-index:1;
+  border: 2px solid #fff; box-shadow: 0 0 0 1px var(--line);
+}
+.tl-body{ padding-left: 4px; }
+.tl-name{ font-weight:700; font-size:13px; }
+.tl-meta{ font-size:11px; color:var(--ink-sub); font-family: var(--font-mono); }
+.tl-ctrl{ display:flex; gap:6px; align-items:center; margin-top:2px; font-size:11px; color:var(--ink-sub); }
+.tl-ctrl input{ width:48px; padding:2px 4px; font-size:11px; }
+.tl-del{ background:none; border:none; color:#B0483A; cursor:pointer; font-size:11px; padding:0 2px; }
+.tl-del:hover{ text-decoration:underline; }
+.tag-rinko{
+  display:inline-block; font-size:10px; font-weight:700; color:#fff;
+  background: var(--rail); border-radius:4px; padding:1px 6px; margin-left:6px;
+  letter-spacing:.1em;
+}
+.empty-note{ padding: 24px 16px; color: var(--ink-sub); font-size:12px; text-align:center; }
+
+/* スポット種別ごとの丸印色（地図凡例と共通） */
+.c-start{ background: var(--pine); }
+.c-michi{ background: #8A6D3B; }   /* 道の駅: 茶 */
+.c-conv{  background: #4A8A4A; }   /* コンビニ: 緑 */
+.c-onsen{ background: #C2554F; }   /* 温泉: 朱 */
+.c-eki{   background: var(--rail);}/* 駅: 鉄紺 */
+.c-goal{  background: var(--kaki);}
+.c-spot{  background: #777; }
+
+/* 地図上のカスタムマーカー（Leaflet divIcon用） */
+.map-mark{
+  width: 26px; height: 26px; border-radius: 50%;
+  display:flex; align-items:center; justify-content:center;
+  font-family: var(--font-display); font-size: 13px; font-weight:600; color:#fff;
+  border: 2px solid #fff; box-shadow: 0 1px 4px rgba(0,0,0,.35);
+}
+
+/* ============================================================
+   スマホ用タブバー（900px以下で表示）
+   ============================================================ */
+.tabbar{ display:none; }
+@media (max-width: 900px){
+  .app{
+    display:block;
+    height: calc(100vh - 44px - 56px); /* ヘッダーとタブバーを除く */
+    padding: 8px;
+  }
+  .col-left, .col-right{ height:100%; }
+  .panel{ height:100%; }
+  #panel-map, #panel-chart{ min-height:0; }
+  /* タブで選択されていないビューは隠す */
+  .view-hidden{ display:none !important; }
+
+  .tabbar{
+    position: fixed; left:0; right:0; bottom:0; height:56px;
+    display:flex;
+    background: var(--panel);
+    border-top: 1px solid var(--line);
+    z-index: 1100;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .tabbar button{
+    flex:1; border:none; background:none; cursor:pointer;
+    font-family: var(--font-body); font-size:11px; color:var(--ink-sub);
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px;
+  }
+  .tabbar button .ico{ font-size:18px; line-height:1; }
+  .tabbar button.active{ color: var(--pine); font-weight:700; }
+  .tabbar button.active .ico{ transform: translateY(-1px); }
+  header h1{ font-size:17px; }
+}
+
+/* アニメーションを抑えたいユーザーへの配慮 */
+@media (prefers-reduced-motion: reduce){
+  *{ transition:none !important; animation:none !important; }
+}
+</style>
+</head>
+<body>
+
+<!-- ============================================================
+     ヘッダー
+     ============================================================ -->
+<header>
+  <h1>サイクリング</h1>
+  <span class="sub">Saiku-ringu ─ ランドナーのための、のんびり旅程計画</span>
+</header>
+
+<!-- ============================================================
+     メインレイアウト
+     PC: 左（地図＋グラフ）/ 右（行程表）の2カラム
+     スマホ: タブバーで #panel-map / #panel-chart / #panel-plan を切替
+     ============================================================ -->
+<div class="app">
+  <div class="col-left" id="col-left">
+
+    <!-- ◆ 地図パネル：ルート作成・GPX読込・スポット設置 -->
+    <section class="panel" id="panel-map" data-view="map">
+      <div class="toolbar">
+        <button class="btn" id="btn-draw">✏ ルート作成モード</button>
+        <button class="btn" id="btn-undo">↩ 1点戻す</button>
+        <button class="btn" id="btn-clear">✕ 全消去</button>
+        <span class="sep"></span>
+        <label class="btn file-label">📂 GPX読込<input type="file" id="gpx-file" accept=".gpx"></label>
+        <span class="sep"></span>
+        <select id="spot-type" title="設置するスポットの種類">
+          <option value="michi">道の駅</option>
+          <option value="conv">コンビニ</option>
+          <option value="onsen">温泉</option>
+          <option value="eki">駅（輪行）</option>
+          <option value="spot">その他</option>
+        </select>
+        <button class="btn" id="btn-spot">📍 スポット設置モード</button>
+        <span class="sep"></span>
+        <button class="btn primary" id="btn-calc">⛰ 標高取得・行程計算</button>
+      </div>
+      <div class="hint" id="hint">「ルート作成モード」を押して地図をクリックすると経由点を打てます。GPXファイルの読み込みも可能です。</div>
+      <div id="map"></div>
+    </section>
+
+    <!-- ◆ 高低差グラフパネル -->
+    <section class="panel" id="panel-chart" data-view="chart">
+      <div class="panel-head"><h2>高低差プロフィール</h2><span id="chart-note" style="font-size:11px;color:var(--ink-sub)"></span></div>
+      <div class="chart-wrap"><canvas id="elev-chart"></canvas></div>
+    </section>
+  </div>
+
+  <!-- ◆ 行程表パネル -->
+  <div class="col-right" id="col-right">
+    <section class="panel" id="panel-plan" data-view="plan">
+      <div class="panel-head">
+        <h2>行程表</h2>
+        <label style="font-size:11px;color:var(--ink-sub)">出発
+          <input type="time" id="dep-time" value="08:00">
+        </label>
+      </div>
+
+      <!-- 走行速度の設定（斜度に応じた予想速度。LocalStorageに保存） -->
+      <details class="settings">
+        <summary>⚙ 走行速度の設定（斜度別・km/h）</summary>
+        <div class="settings-grid">
+          <label>下り（-2%未満）<input type="number" id="v-down" value="28" min="1"></label>
+          <label>平地（±2%）<input type="number" id="v-flat" value="20" min="1"></label>
+          <label>緩い上り（2〜5%）<input type="number" id="v-mild" value="12" min="1"></label>
+          <label>急な上り（5%以上）<input type="number" id="v-steep" value="8" min="1"></label>
+        </div>
+      </details>
+
+      <!-- 距離・獲得標高・到着予想のサマリー -->
+      <div class="summary">
+        <div><div class="num" id="sum-dist">–</div><div class="lbl">距離 km</div></div>
+        <div><div class="num" id="sum-up">–</div><div class="lbl">獲得標高 m</div></div>
+        <div><div class="num" id="sum-goal">–</div><div class="lbl">到着予想</div></div>
+      </div>
+
+      <!-- タイムライン本体（JSで描画） -->
+      <div class="plan-body">
+        <ol class="timeline" id="timeline"></ol>
+        <div class="empty-note" id="plan-empty">まだ行程がありません。<br>ルートを作成し「標高取得・行程計算」を押してください。</div>
+      </div>
+    </section>
+  </div>
+</div>
+
+<!-- ============================================================
+     スマホ用タブバー（地図 / グラフ / 行程表）
+     ============================================================ -->
+<nav class="tabbar" id="tabbar">
+  <button data-tab="map" class="active"><span class="ico">🗺</span>地図</button>
+  <button data-tab="chart"><span class="ico">⛰</span>グラフ</button>
+  <button data-tab="plan"><span class="ico">🕐</span>行程表</button>
+</nav>
+
+<script>
+/* ================================================================
+   Saiku-ringu  メインスクリプト（Vanilla JS）
+   構成:
+     1) 地図の初期化（Leaflet + OpenStreetMap）
+     2) ルート作成（クリック描画）と GPX 読込
+     3) 標高取得（国土地理院 標高API: キー不要のオープンデータ）
+     4) 斜度に応じた所要時間計算（のんびり旅モデル）
+     5) スポット（道の駅・コンビニ・温泉・駅）と行程表の連動
+     6) 高低差グラフ（Chart.js）
+     7) レスポンシブ: スマホ用タブ切替
+   ================================================================ */
+
+/* ---------- 共通の状態 ---------- */
+const state = {
+  waypoints: [],   // クリックで打った経由点 [{lat,lng}]
+  route: [],       // 計算済みルート点 [{lat,lng,ele,dist(累積km),cumH(累積走行時間h)}]
+  spots: [],       // 休憩スポット [{id,type,name,lat,lng,distAlong,restMin}]
+  mode: null,      // 'draw' | 'spot' | null
+};
+const SPOT_DEF = {
+  michi: { label:'道の駅',   kanji:'道', cls:'c-michi' },
+  conv:  { label:'コンビニ', kanji:'コ', cls:'c-conv'  },
+  onsen: { label:'温泉',     kanji:'湯', cls:'c-onsen' },
+  eki:   { label:'駅',       kanji:'駅', cls:'c-eki'   },
+  spot:  { label:'スポット', kanji:'点', cls:'c-spot'  },
+};
+let spotSeq = 1;
+
+/* ================================================================
+   1) 地図の初期化（OpenStreetMap: APIキー不要）
+   ================================================================ */
+const map = L.map('map').setView([35.681, 139.767], 11); // 初期表示: 東京駅付近
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19,
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+}).addTo(map);
+
+const routeLine  = L.polyline([], { color:'#D96B2F', weight:4, opacity:.9 }).addTo(map); // 柿色のルート線
+const wpLayer    = L.layerGroup().addTo(map);  // 経由点の小マーカー
+const spotLayer  = L.layerGroup().addTo(map);  // スポットマーカー
+
+/* スポット用の丸印アイコン（旧版地図の凡例風に漢字一文字） */
+function makeIcon(kanji, cls){
+  return L.divIcon({ className:'', html:`<div class="map-mark ${cls}">${kanji}</div>`, iconSize:[26,26], iconAnchor:[13,13] });
+}
+
+/* ================================================================
+   2) ルート作成モード / スポット設置モード（地図クリックの振り分け）
+   ================================================================ */
+const $ = id => document.getElementById(id);
+const hint = $('hint');
+
+function setMode(m){
+  state.mode = (state.mode === m) ? null : m;
+  $('btn-draw').classList.toggle('toggled', state.mode==='draw');
+  $('btn-spot').classList.toggle('toggled', state.mode==='spot');
+  hint.textContent =
+    state.mode==='draw' ? '地図をクリックして経由点を追加します。打ち終えたら「標高取得・行程計算」を押してください。' :
+    state.mode==='spot' ? `地図をクリックすると「${SPOT_DEF[$('spot-type').value].label}」を設置します（ルート最寄り点に紐付け）。` :
+    'モードを選択してください。';
+}
+$('btn-draw').addEventListener('click', () => setMode('draw'));
+$('btn-spot').addEventListener('click', () => setMode('spot'));
+
+map.on('click', e => {
+  if (state.mode === 'draw') addWaypoint(e.latlng);
+  else if (state.mode === 'spot') addSpot(e.latlng);
+});
+
+/* --- 経由点を追加し、線を引き直す --- */
+function addWaypoint(latlng){
+  state.waypoints.push(latlng);
+  L.circleMarker(latlng, { radius:4, color:'#1F4636', fillColor:'#fff', fillOpacity:1, weight:2 }).addTo(wpLayer);
+  routeLine.setLatLngs(state.waypoints);
+}
+
+/* --- 1点戻す / 全消去 --- */
+$('btn-undo').addEventListener('click', () => {
+  state.waypoints.pop();
+  wpLayer.clearLayers();
+  state.waypoints.forEach(p => L.circleMarker(p, { radius:4, color:'#1F4636', fillColor:'#fff', fillOpacity:1, weight:2 }).addTo(wpLayer));
+  routeLine.setLatLngs(state.waypoints);
+});
+$('btn-clear').addEventListener('click', () => {
+  if (!confirm('ルートとスポットをすべて消去しますか？')) return;
+  state.waypoints = []; state.route = []; state.spots = [];
+  wpLayer.clearLayers(); spotLayer.clearLayers(); routeLine.setLatLngs([]);
+  renderChart(); renderTimeline();
+});
+
+/* ================================================================
+   GPXファイル読込（<trkpt>/<rtept> から緯度経度・標高を抽出）
+   ================================================================ */
+$('gpx-file').addEventListener('change', async e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const text = await file.text();
+  const xml  = new DOMParser().parseFromString(text, 'application/xml');
+  let pts = [...xml.querySelectorAll('trkpt, rtept')].map(p => ({
+    lat: +p.getAttribute('lat'),
+    lng: +p.getAttribute('lon'),
+    ele: p.querySelector('ele') ? +p.querySelector('ele').textContent : null,
+  }));
+  if (pts.length < 2){ alert('GPXからルート点を読み取れませんでした。'); return; }
+
+  /* 点数が多い場合は約300点に間引き（グラフ・計算を軽くするため） */
+  if (pts.length > 300){
+    const step = Math.ceil(pts.length / 300);
+    pts = pts.filter((_, i) => i % step === 0 || i === pts.length - 1);
+  }
+  state.waypoints = pts.map(p => L.latLng(p.lat, p.lng));
+  wpLayer.clearLayers();
+  routeLine.setLatLngs(state.waypoints);
+  map.fitBounds(routeLine.getBounds(), { padding:[24,24] });
+
+  /* 標高がGPXに含まれていれば即計算、無ければAPI取得が必要な旨を表示 */
+  if (pts.every(p => p.ele !== null)){
+    buildRoute(pts);
+    hint.textContent = 'GPXの標高データを使用して行程を計算しました。';
+  } else {
+    hint.textContent = 'GPXに標高がありません。「標高取得・行程計算」を押してください。';
+  }
+  e.target.value = '';
+});
+
+/* ================================================================
+   3) 標高取得・行程計算 ボタン
+   - 手描きルートは約500m間隔（最大60点）に再サンプリングし、
+     国土地理院 標高API（キー不要）で1点ずつ標高を取得する。
+     https://cyberjapandata2.gsi.go.jp/general/dem/scripts/getelevation.php
+   - 日本国外など取得に失敗した点は標高0mとして扱い、注記を出す。
+   ================================================================ */
+$('btn-calc').addEventListener('click', async () => {
+  if (state.waypoints.length < 2){ alert('先にルートを2点以上作成してください。'); return; }
+
+  /* --- 経由点間を直線補間して計算用の点列を作る --- */
+  const samples = resample(state.waypoints, 60);
+  hint.textContent = `標高を取得中… (0/${samples.length})`;
+  $('btn-calc').disabled = true;
+
+  let failed = 0;
+  for (let i = 0; i < samples.length; i++){
+    try{
+      const url = `https://cyberjapandata2.gsi.go.jp/general/dem/scripts/getelevation.php?lon=${samples[i].lng}&lat=${samples[i].lat}&outtype=JSON`;
+      const res = await fetch(url);
+      const j   = await res.json();
+      samples[i].ele = (typeof j.elevation === 'number') ? j.elevation : (parseFloat(j.elevation) || 0);
+      if (typeof j.elevation !== 'number' && isNaN(parseFloat(j.elevation))) failed++;
+    }catch(err){ samples[i].ele = 0; failed++; }
+    hint.textContent = `標高を取得中… (${i+1}/${samples.length})`;
+    await new Promise(r => setTimeout(r, 120)); // APIへの負荷を抑える待機
+  }
+  $('btn-calc').disabled = false;
+  buildRoute(samples);
+  hint.textContent = failed
+    ? `行程を計算しました（${failed}点は標高取得に失敗し0m扱い。国土地理院APIは日本国内のみ対応）。`
+    : '行程を計算しました。スポット設置モードで休憩地点を追加できます。';
+});
+
+/* --- 経由点列を約等間隔に再サンプリング（最大maxPts点） --- */
+function resample(wps, maxPts){
+  const out = [{ lat: wps[0].lat, lng: wps[0].lng, ele: null }];
+  let total = 0;
+  for (let i = 0; i < wps.length - 1; i++) total += haversine(wps[i], wps[i+1]);
+  const step = Math.max(0.3, total / (maxPts - 1)); // 1区間 最低300m
+  for (let i = 0; i < wps.length - 1; i++){
+    const d = haversine(wps[i], wps[i+1]);
+    const n = Math.max(1, Math.round(d / step));
+    for (let k = 1; k <= n; k++){
+      const t = k / n;
+      out.push({ lat: wps[i].lat + (wps[i+1].lat - wps[i].lat) * t,
+                 lng: wps[i].lng + (wps[i+1].lng - wps[i].lng) * t, ele: null });
+    }
+  }
+  return out;
+}
+
+/* --- 2点間距離（km）: ハバーサイン公式 --- */
+function haversine(a, b){
+  const R = 6371, rad = x => x * Math.PI / 180;
+  const dLat = rad(b.lat - a.lat), dLng = rad(b.lng - a.lng);
+  const s = Math.sin(dLat/2)**2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLng/2)**2;
+  return 2 * R * Math.asin(Math.sqrt(s));
+}
+
+/* ================================================================
+   4) 所要時間モデル（ランドナーの「のんびり旅」）
+   斜度に応じて速度を切り替え:
+     下り(-2%未満) / 平地(±2%) / 緩い上り(2〜5%) / 急な上り(5%以上)
+   速度はUIで変更でき、LocalStorageに保存される。
+   ================================================================ */
+function speeds(){
+  return {
+    down:  +$('v-down').value  || 28,
+    flat:  +$('v-flat').value  || 20,
+    mild:  +$('v-mild').value  || 12,
+    steep: +$('v-steep').value || 8,
+  };
+}
+function speedFor(gradePct, v){
+  if (gradePct >= 5)  return v.steep;
+  if (gradePct >= 2)  return v.mild;
+  if (gradePct <= -2) return v.down;
+  return v.flat;
+}
+
+/* --- 点列から累積距離・累積時間を計算し、各表示を更新 --- */
+function buildRoute(pts){
+  const v = speeds();
+  let dist = 0, time = 0;
+  state.route = pts.map((p, i) => {
+    if (i > 0){
+      const d = haversine(pts[i-1], p);                 // 区間距離 km
+      const dEle = (p.ele ?? 0) - (pts[i-1].ele ?? 0);  // 標高差 m
+      const grade = d > 0 ? (dEle / (d * 1000)) * 100 : 0;
+      dist += d;
+      time += d / speedFor(grade, v);                   // 区間時間 h
+    }
+    return { lat:p.lat, lng:p.lng, ele:p.ele ?? 0, dist, cumH: time };
+  });
+  routeLine.setLatLngs(state.route.map(p => [p.lat, p.lng]));
+  /* 既存スポットのルート上位置を取り直す */
+  state.spots.forEach(s => { s.distAlong = nearestDist(s); });
+  renderChart();
+  renderTimeline();
+}
+
+/* 速度・出発時刻を変えたら行程を再計算（LocalStorage保存も） */
+['v-down','v-flat','v-mild','v-steep'].forEach(id => {
+  const saved = localStorage.getItem('saiku_' + id);
+  if (saved) $(id).value = saved;
+  $(id).addEventListener('change', () => {
+    localStorage.setItem('saiku_' + id, $(id).value);
+    if (state.route.length) buildRoute(state.route);
+  });
+});
+$('dep-time').addEventListener('change', renderTimeline);
+
+/* ================================================================
+   5) スポット（休憩・輪行ポイント）と行程表の連動
+   ================================================================ */
+function addSpot(latlng){
+  const type = $('spot-type').value;
+  const def  = SPOT_DEF[type];
+  const name = prompt(`${def.label}の名前を入力してください`, `${def.label}${spotSeq}`);
+  if (name === null) return;
+  const s = {
+    id: spotSeq++,
+    type, name: name || def.label,
+    lat: latlng.lat, lng: latlng.lng,
+    restMin: type === 'eki' ? 0 : 15,  // 駅は輪行終点扱いなので休憩0分を初期値に
+    distAlong: null, marker: null,
+  };
+  s.distAlong = nearestDist(s);
+  s.marker = L.marker([s.lat, s.lng], { icon: makeIcon(def.kanji, def.cls) })
+    .addTo(spotLayer).bindPopup(`<b>${escapeHtml(s.name)}</b><br>${def.label}`);
+  state.spots.push(s);
+  renderTimeline(); renderChart();
+}
+
+/* スポットに最も近いルート点の累積距離を返す（ルート未計算ならnull） */
+function nearestDist(s){
+  if (!state.route.length) return null;
+  let best = Infinity, bd = null;
+  for (const p of state.route){
+    const d = haversine(s, p);
+    if (d < best){ best = d; bd = p.dist; }
+  }
+  return bd;
+}
+
+function escapeHtml(t){ return t.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+/* --- 出発時刻 + 走行時間 + それまでの休憩時間 から到着時刻を算出 --- */
+function depMinutes(){
+  const [h, m] = $('dep-time').value.split(':').map(Number);
+  return h * 60 + m;
+}
+function fmtTime(min){
+  min = Math.round(min);
+  const d = Math.floor(min / 1440);
+  const h = Math.floor((min % 1440) / 60), m = min % 60;
+  return (d ? `翌` : '') + String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0');
+}
+
+/* タイムラインのある時点（累積距離）での走行時間hを線形補間で求める */
+function rideHoursAt(dist){
+  const r = state.route;
+  if (!r.length) return 0;
+  if (dist <= 0) return 0;
+  for (let i = 1; i < r.length; i++){
+    if (r[i].dist >= dist){
+      const a = r[i-1], b = r[i];
+      const t = b.dist === a.dist ? 0 : (dist - a.dist) / (b.dist - a.dist);
+      return a.cumH + (b.cumH - a.cumH) * t;
+    }
+  }
+  return r[r.length - 1].cumH;
+}
+
+/* ================================================================
+   行程表（タイムライン）の描画
+   出発地 → 各スポット(到着時刻・休憩) → 到着地 を時刻表風に並べる
+   ================================================================ */
+function renderTimeline(){
+  const ol = $('timeline');
+  ol.innerHTML = '';
+  const hasRoute = state.route.length >= 2;
+  $('plan-empty').style.display = hasRoute || state.spots.length ? 'none' : '';
+
+  /* サマリー（距離・獲得標高・到着予想） */
+  let totalUp = 0;
+  for (let i = 1; i < state.route.length; i++){
+    const d = state.route[i].ele - state.route[i-1].ele;
+    if (d > 0) totalUp += d;
+  }
+  $('sum-dist').textContent = hasRoute ? state.route.at(-1).dist.toFixed(1) : '–';
+  $('sum-up').textContent   = hasRoute ? Math.round(totalUp) : '–';
+
+  const dep = depMinutes();
+  const sorted = [...state.spots].sort((a,b) => (a.distAlong ?? Infinity) - (b.distAlong ?? Infinity));
+
+  /* --- 出発地 --- */
+  if (hasRoute){
+    ol.appendChild(tlItem({ time: fmtTime(dep), sub:'発', kanji:'発', cls:'c-start', name:'出発地', meta:'0.0 km' }));
+  }
+
+  /* --- スポット --- */
+  let restAccum = 0; // それまでに取った休憩の合計（分）
+  for (const s of sorted){
+    const def = SPOT_DEF[s.type];
+    let timeText = '—', meta = 'ルート未計算';
+    if (hasRoute && s.distAlong !== null){
+      const arrive = dep + rideHoursAt(s.distAlong) * 60 + restAccum;
+      timeText = fmtTime(arrive);
+      meta = `${s.distAlong.toFixed(1)} km地点`;
+      restAccum += s.restMin;
+    }
+    const li = tlItem({
+      time: timeText, sub:'着', kanji: def.kanji, cls: def.cls,
+      name: s.name + (s.type === 'eki' ? '<span class="tag-rinko">輪行</span>' : ''),
+      meta,
+    });
+    /* 休憩時間の編集と削除 */
+    const ctrl = document.createElement('div');
+    ctrl.className = 'tl-ctrl';
+    ctrl.innerHTML = `休憩 <input type="number" min="0" step="5" value="${s.restMin}"> 分
+      <button class="tl-del">削除</button>`;
+    ctrl.querySelector('input').addEventListener('change', ev => {
+      s.restMin = Math.max(0, +ev.target.value || 0); renderTimeline();
+    });
+    ctrl.querySelector('.tl-del').addEventListener('click', () => {
+      spotLayer.removeLayer(s.marker);
+      state.spots = state.spots.filter(x => x.id !== s.id);
+      renderTimeline(); renderChart();
+    });
+    li.querySelector('.tl-body').appendChild(ctrl);
+    ol.appendChild(li);
+  }
+
+  /* --- 到着地 --- */
+  if (hasRoute){
+    const goal = dep + state.route.at(-1).cumH * 60 + restAccum;
+    $('sum-goal').textContent = fmtTime(goal);
+    ol.appendChild(tlItem({ time: fmtTime(goal), sub:'着', kanji:'着', cls:'c-goal',
+      name:'到着地', meta:`${state.route.at(-1).dist.toFixed(1)} km` }));
+  } else {
+    $('sum-goal').textContent = '–';
+  }
+}
+
+/* タイムライン1行分のDOMを生成 */
+function tlItem({ time, sub, kanji, cls, name, meta }){
+  const li = document.createElement('li');
+  li.className = 'tl-item';
+  li.innerHTML = `
+    <div class="tl-time">${time}<small>${sub}</small></div>
+    <div class="tl-mark ${cls}">${kanji}</div>
+    <div class="tl-body"><div class="tl-name">${name}</div><div class="tl-meta">${meta}</div></div>`;
+  return li;
+}
+
+/* ================================================================
+   6) 高低差グラフ（Chart.js）
+   横軸: 距離km / 縦軸: 標高m。スポット位置を点で重ねて表示。
+   ================================================================ */
+let chart = null;
+function renderChart(){
+  const ctx = $('elev-chart').getContext('2d');
+  const data = state.route.map(p => ({ x: +p.dist.toFixed(2), y: Math.round(p.ele) }));
+  const spotPts = state.spots
+    .filter(s => s.distAlong !== null)
+    .map(s => ({ x: +s.distAlong.toFixed(2), y: Math.round(eleAt(s.distAlong)), label: s.name }));
+
+  $('chart-note').textContent = data.length ? '' : 'ルート計算後に表示されます';
+  if (chart) chart.destroy();
+  chart = new Chart(ctx, {
+    type: 'line',
+    data: { datasets: [
+      { label:'標高', data, parsing:false, borderColor:'#D96B2F', borderWidth:2,
+        backgroundColor:'rgba(217,107,47,.18)', fill:'origin', pointRadius:0, tension:.25 },
+      { label:'スポット', data: spotPts, parsing:false, type:'scatter',
+        pointRadius:5, pointStyle:'rectRot', backgroundColor:'#2F5D8A' },
+    ]},
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      scales: {
+        x: { type:'linear', title:{ display:true, text:'距離 (km)', font:{ size:10 } },
+             ticks:{ font:{ family:'IBM Plex Mono', size:10 } }, grid:{ color:'#EDF0ED' } },
+        y: { title:{ display:true, text:'標高 (m)', font:{ size:10 } },
+             ticks:{ font:{ family:'IBM Plex Mono', size:10 } }, grid:{ color:'#EDF0ED' } },
+      },
+      plugins: {
+        legend: { display:false },
+        tooltip: { callbacks: {
+          title: items => `${items[0].parsed.x} km`,
+          label: item => item.datasetIndex === 1
+            ? `${item.raw.label}（${item.parsed.y}m）`
+            : `標高 ${item.parsed.y}m`,
+        }},
+      },
+    },
+  });
+}
+/* 累積距離distにおける標高を線形補間で求める（グラフのスポット表示用） */
+function eleAt(dist){
+  const r = state.route;
+  if (!r.length) return 0;
+  for (let i = 1; i < r.length; i++){
+    if (r[i].dist >= dist){
+      const a = r[i-1], b = r[i];
+      const t = b.dist === a.dist ? 0 : (dist - a.dist) / (b.dist - a.dist);
+      return a.ele + (b.ele - a.ele) * t;
+    }
+  }
+  return r.at(-1).ele;
+}
+
+/* ================================================================
+   7) スマホ用タブ切替（900px以下）
+   非表示→表示の切替後に Leaflet / Chart.js のサイズ再計算を行う
+   ================================================================ */
+const mql = window.matchMedia('(max-width: 900px)');
+function applyTab(tab){
+  document.querySelectorAll('#tabbar button').forEach(b =>
+    b.classList.toggle('active', b.dataset.tab === tab));
+  document.querySelectorAll('[data-view]').forEach(p =>
+    p.classList.toggle('view-hidden', mql.matches && p.dataset.view !== tab));
+  /* 表示し直したパネルの再レイアウト */
+  setTimeout(() => {
+    if (tab === 'map')   map.invalidateSize();
+    if (tab === 'chart' && chart) chart.resize();
+  }, 60);
+}
+document.querySelectorAll('#tabbar button').forEach(b =>
+  b.addEventListener('click', () => applyTab(b.dataset.tab)));
+
+/* PC⇔スマホの自動切替: 画面幅の変化を監視してレイアウトを更新 */
+function onLayoutChange(){
+  if (mql.matches){
+    applyTab(document.querySelector('#tabbar button.active').dataset.tab);
+  } else {
+    document.querySelectorAll('[data-view]').forEach(p => p.classList.remove('view-hidden'));
+    setTimeout(() => { map.invalidateSize(); if (chart) chart.resize(); }, 60);
+  }
+}
+mql.addEventListener('change', onLayoutChange);
+onLayoutChange();
+
+/* 初期描画 */
+renderChart();
+renderTimeline();
+</script>
+</body>
+</html>
